@@ -119,6 +119,7 @@ DisplayDevice::DisplayDevice(
     Surface* surface;
     mNativeWindow = surface = new Surface(producer, false);
     ANativeWindow* const window = mNativeWindow.get();
+    char property[PROPERTY_VALUE_MAX];
 
 #ifdef USE_HWC2
     mActiveColorMode = HAL_COLOR_MODE_NATIVE;
@@ -182,6 +183,16 @@ DisplayDevice::DisplayDevice(
             mDisplayName = "Virtual Screen";    // e.g. Overlay #n
             break;
     }
+
+    mPanelMountFlip = 0;
+    // 1: H-Flip, 2: V-Flip, 3: 180 (HV Flip)
+    property_get("ro.panel.mountflip", property, "0");
+    mPanelMountFlip = atoi(property);
+
+    // we store the value as orientation:
+    // 90 -> 1, 180 -> 2, 270 -> 3
+    mHardwareRotation = property_get_int32("ro.sf.hwrotation", 0) / 90;
+
 
     // initialize the display orientation transform.
     setProjection(DisplayState::eOrientationDefault, mViewport, mFrame);
@@ -315,7 +326,7 @@ status_t DisplayDevice::prepareFrame(const HWComposer& hwc) const {
 
 void DisplayDevice::swapBuffers(HWComposer& hwc) const {
 #ifdef USE_HWC2
-    if (hwc.hasClientComposition(mHwcDisplayId)) {
+    if (hwc.hasClientComposition(mHwcDisplayId) || hwc.hasFlipFBTRequest(mHwcDisplayId)) {
 #else
     // We need to call eglSwapBuffers() if:
     //  (1) we don't have a hardware composer, or
@@ -483,6 +494,12 @@ status_t DisplayDevice::orientationToTransfrom(
         int orientation, int w, int h, Transform* tr)
 {
     uint32_t flags = 0;
+
+    if (mHardwareRotation && mType == DisplayType::DISPLAY_PRIMARY) {
+        orientation += mHardwareRotation;
+        orientation %= 4;
+    }
+
     switch (orientation) {
     case DisplayState::eOrientationDefault:
         flags = Transform::ROT_0;
@@ -499,6 +516,11 @@ status_t DisplayDevice::orientationToTransfrom(
     default:
         return BAD_VALUE;
     }
+
+    if (DISPLAY_PRIMARY == mHwcDisplayId) {
+        flags = flags ^ getPanelMountFlip();
+    }
+
     tr->set(flags, w, h);
     return NO_ERROR;
 }
@@ -538,7 +560,11 @@ void DisplayDevice::setProjection(int orientation,
     if (!frame.isValid()) {
         // the destination frame can be invalid if it has never been set,
         // in that case we assume the whole display frame.
-        frame = Rect(w, h);
+        if (mHardwareRotation == 1 || mHardwareRotation == 3) {
+            frame = Rect(h, w);
+        } else {
+            frame = Rect(w, h);
+        }
     }
 
     if (viewport.isEmpty()) {

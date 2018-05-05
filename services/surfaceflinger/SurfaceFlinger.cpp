@@ -30,6 +30,7 @@
 
 #include <EGL/egl.h>
 
+#include <bfqio/bfqio.h>
 #include <cutils/properties.h>
 #include <log/log.h>
 
@@ -635,6 +636,7 @@ void SurfaceFlinger::init() {
 
     mEventControlThread = new EventControlThread(this);
     mEventControlThread->run("EventControl", PRIORITY_URGENT_DISPLAY);
+    android_set_rt_ioprio(mEventControlThread->getTid(), 1);
 
     // initialize our drawing state
     mDrawingState = mCurrentState;
@@ -800,10 +802,20 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             info.orientation = 0;
         }
 
-        info.w = hwConfig->getWidth();
-        info.h = hwConfig->getHeight();
-        info.xdpi = xdpi;
-        info.ydpi = ydpi;
+        char value[PROPERTY_VALUE_MAX];
+        property_get("ro.sf.hwrotation", value, "0");
+        int additionalRot = atoi(value) / 90;
+        if ((type == DisplayDevice::DISPLAY_PRIMARY) && (additionalRot & DisplayState::eOrientationSwapMask)) {
+            info.h = hwConfig->getWidth();
+            info.w = hwConfig->getHeight();
+            info.xdpi = ydpi;
+            info.ydpi = xdpi;
+        } else {
+            info.w = hwConfig->getWidth();
+            info.h = hwConfig->getHeight();
+            info.xdpi = xdpi;
+            info.ydpi = ydpi;
+        }
         info.fps = 1e9 / hwConfig->getVsyncPeriod();
         info.appVsyncOffset = vsyncPhaseOffsetNs;
 
@@ -874,8 +886,10 @@ void SurfaceFlinger::setActiveConfigInternal(const sp<DisplayDevice>& hw, int mo
         return;
     }
 
-    hw->setActiveConfig(mode);
-    getHwComposer().setActiveConfig(type, mode);
+    status_t status = getHwComposer().setActiveConfig(type, mode);
+    if (status == NO_ERROR) {
+        hw->setActiveConfig(mode);
+    }
 }
 
 status_t SurfaceFlinger::setActiveConfig(const sp<IBinder>& display, int mode) {
@@ -1273,6 +1287,14 @@ void SurfaceFlinger::createDefaultDisplayDevice() {
     sp<DisplayDevice> hw = new DisplayDevice(this, DisplayDevice::DISPLAY_PRIMARY, type, isSecure,
                                              token, fbs, producer, mRenderEngine->getEGLConfig(),
                                              useWideColorMode);
+
+    // When a non-virtual display device is added at boot time,
+    // update the active config by querying HWC otherwise the
+    // default config (config 0) will be used.
+    int activeConfig = mHwc->getActiveConfig(type)->getId();
+    if (activeConfig >= 0) {
+        hw->setActiveConfig(activeConfig);
+    }
     mDisplays.add(token, hw);
     android_color_mode defaultColorMode = HAL_COLOR_MODE_NATIVE;
     if (useWideColorMode) {
@@ -2214,6 +2236,16 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
                         hw->setProjection(state.orientation,
                                 state.viewport, state.frame);
                         hw->setDisplayName(state.displayName);
+                        // When a new display device is added update the active
+                        // config by querying HWC otherwise the default config
+                        // (config 0) will be used.
+                        if (hwcId >= DisplayDevice::DISPLAY_PRIMARY &&
+                                hwcId < DisplayDevice::NUM_BUILTIN_DISPLAY_TYPES) {
+                            int activeConfig = mHwc->getActiveConfig(hwcId)->getId();
+                            if (activeConfig >= 0) {
+                                hw->setActiveConfig(activeConfig);
+                            }
+                        }
                         mDisplays.add(display, hw);
                         if (!state.isVirtualDisplay()) {
                             mEventThread->onHotplugReceived(state.type, true);
@@ -4407,6 +4439,16 @@ void SurfaceFlinger::renderScreenImplLocked(
 
     // make sure to clear all GL error flags
     engine.checkErrors();
+
+    if (DisplayDevice::DISPLAY_PRIMARY == hw->getDisplayType()) {
+        rotation = (Transform::orientation_flags)
+                   (rotation ^ hw->getPanelMountFlip());
+        if (hw->getPanelMountFlip() == Transform::orientation_flags::ROT_180) {
+            sourceCrop.top = hw_h - sourceCrop.top;
+            sourceCrop.bottom = hw_h - sourceCrop.bottom;
+            yswap = false;
+        }
+    }
 
     // set-up our viewport
     engine.setViewportAndProjection(

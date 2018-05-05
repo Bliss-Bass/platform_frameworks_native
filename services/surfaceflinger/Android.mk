@@ -58,6 +58,10 @@ else
     LOCAL_SRC_FILES += \
         SurfaceFlinger_hwc1.cpp \
         DisplayHardware/HWComposer_hwc1.cpp
+
+    ifeq ($(OMAP_ENHANCEMENT),true)
+        LOCAL_CFLAGS += -DOMAP_ENHANCEMENT
+    endif
 endif
 
 LOCAL_CFLAGS += -fvisibility=hidden -Werror=format
@@ -75,6 +79,7 @@ LOCAL_SHARED_LIBRARIES := \
     android.hardware.graphics.composer@2.1 \
     android.hardware.configstore@1.0 \
     android.hardware.configstore-utils \
+    libbfqio \
     libcutils \
     liblog \
     libdl \
